@@ -14,20 +14,37 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.phys.Vec3;
 import org.jetbrains.annotations.Nullable;
 
+/**
+ * Runtime state for one mounted Digital Miner.
+ *
+ * v5 deliberately separates "targets ready to mine" from "scan backlog":
+ * scanning only runs while the target queue is empty. A completed bounds cache
+ * lets a moving miner scan only the newly exposed delta instead of re-reading
+ * the full overlapping volume.
+ */
 public final class MountedScanState {
+    // Kept for binary/source compatibility with 0.1.21. v5's planner no longer
+    // relies on trail anchors; delta bounds are strictly cheaper and safer.
     private final ArrayDeque<BlockPos> pendingAnchors = new ArrayDeque<>();
+
     private final ArrayDeque<MountedScanSectionJob> pendingSectionJobs = new ArrayDeque<>();
     private final HashSet<MountedScanSectionJob> pendingSectionJobSet = new HashSet<>();
     private final LinkedHashSet<ChunkPos> recentTicketChunks = new LinkedHashSet<>();
     private final LinkedHashMap<BlockPos, MountedMiningTarget> queuedTargets = new LinkedHashMap<>();
     private final LinkedHashSet<ChunkPos> lastAppliedTicketChunks = new LinkedHashSet<>();
 
-    @Nullable private Vec3 lastGlobalCenter;
-    @Nullable private ChunkPos lastTicketCenterChunk;
-    @Nullable private MountedScanSectionJob activeSectionJob;
-    @Nullable private MountedScanBounds lastPrunedBounds;
-    @Nullable private MountedScanBounds completedScanBounds;
-    @Nullable private MountedScanBounds scanGenerationBounds;
+    @Nullable
+    private Vec3 lastGlobalCenter;
+    @Nullable
+    private ChunkPos lastTicketCenterChunk;
+    @Nullable
+    private MountedScanSectionJob activeSectionJob;
+    @Nullable
+    private MountedScanBounds lastPrunedBounds;
+    @Nullable
+    private MountedScanBounds completedScanBounds;
+    @Nullable
+    private MountedScanBounds scanGenerationBounds;
 
     private int sectionCursor;
     private int lastVisitedPositions;
@@ -64,8 +81,14 @@ public final class MountedScanState {
         recordScanStats(0, 0, 0, 0, 0, 0);
     }
 
+    /**
+     * A configuration/filter change invalidates every cached mining decision.
+     * This is an explicit user-driven invalidation, not a periodic refresh.
+     */
     public boolean updateScanSignature(long signature) {
-        if (hasScanSignature && scanSignature == signature) return false;
+        if (hasScanSignature && scanSignature == signature) {
+            return false;
+        }
         hasScanSignature = true;
         scanSignature = signature;
         invalidateScanAndTargets();
@@ -87,6 +110,11 @@ public final class MountedScanState {
         recordScanStats(0, 0, 0, 0, 0, 0);
     }
 
+    /**
+     * If the projected world chunk holding the mounted miner is no longer
+     * loaded, all projected scan/target cache is treated as stale. This is the
+     * second (and only other) automatic refresh trigger besides an empty queue.
+     */
     public void invalidateForMinerChunkUnload() {
         invalidateScanAndTargets();
         minerChunkLoaded = false;
@@ -102,13 +130,26 @@ public final class MountedScanState {
         return minerChunkLoaded;
     }
 
+    /**
+     * Pruning can touch thousands of queued targets, so do it only when the
+     * actual scan bounds changed.
+     *
+     * A running scan generation is a frozen snapshot. Movement may invalidate
+     * queued mining targets that left the live radius, but it must never throw
+     * away the generation backlog itself: doing so lets a moving/hovering ship
+     * restart the scan forever before it can reach completion.
+     */
     public int pruneOutside(MountedScanBounds bounds, int radius, int diameter) {
-        if (bounds.equals(lastPrunedBounds)) return 0;
+        if (bounds.equals(lastPrunedBounds)) {
+            return 0;
+        }
         lastPrunedBounds = bounds;
 
         if (bounds.isEmpty()) {
             int removed = pendingAnchors.size() + pendingSectionJobs.size() + recentTicketChunks.size() + queuedTargets.size();
-            if (activeSectionJob != null) removed++;
+            if (activeSectionJob != null) {
+                removed++;
+            }
             pendingAnchors.clear();
             clearSectionBacklog();
             recentTicketChunks.clear();
@@ -119,18 +160,27 @@ public final class MountedScanState {
         }
 
         int removed = 0;
-        int before = pendingAnchors.size();
+        int before = queuedTargets.size();
+        queuedTargets.entrySet().removeIf(entry -> !bounds.contains(entry.getKey()));
+        removed += before - queuedTargets.size();
+
+        // Never prune/replace the section backlog of an active snapshot. It is
+        // finite and must be allowed to finish even if physics moves the miner.
+        if (scanGenerationBounds != null) {
+            return removed;
+        }
+
+        before = pendingAnchors.size();
         pendingAnchors.removeIf(anchor -> !bounds.intersectsHorizontalScan(anchor, radius, diameter));
         removed += before - pendingAnchors.size();
+
         before = pendingSectionJobs.size();
         pendingSectionJobs.removeIf(job -> !bounds.intersects(job));
         removed += before - pendingSectionJobs.size();
+
         before = recentTicketChunks.size();
         recentTicketChunks.removeIf(chunk -> !bounds.intersects(chunk));
         removed += before - recentTicketChunks.size();
-        before = queuedTargets.size();
-        queuedTargets.entrySet().removeIf(entry -> !bounds.contains(entry.getKey()));
-        removed += before - queuedTargets.size();
 
         if (activeSectionJob != null && !bounds.intersects(activeSectionJob)) {
             pendingSectionJobSet.remove(activeSectionJob);
@@ -142,6 +192,7 @@ public final class MountedScanState {
         return removed;
     }
 
+    /** Compatibility method. v5 ignores vertical-only movement. */
     public void updateAnchors(Vec3 currentGlobalCenter, int maxSamples) {
         if (lastGlobalCenter == null) {
             enqueueAnchor(BlockPos.containing(currentGlobalCenter));
@@ -151,7 +202,9 @@ public final class MountedScanState {
         BlockPos previous = BlockPos.containing(lastGlobalCenter);
         BlockPos current = BlockPos.containing(currentGlobalCenter);
         lastGlobalCenter = currentGlobalCenter;
-        if (previous.getX() == current.getX() && previous.getZ() == current.getZ()) return;
+        if (previous.getX() == current.getX() && previous.getZ() == current.getZ()) {
+            return;
+        }
 
         int dx = current.getX() - previous.getX();
         int dz = current.getZ() - previous.getZ();
@@ -166,15 +219,25 @@ public final class MountedScanState {
     }
 
     private void enqueueAnchor(BlockPos anchor) {
-        if (!pendingAnchors.contains(anchor)) pendingAnchors.add(anchor);
-        while (pendingAnchors.size() > 64) pendingAnchors.removeFirst();
+        if (!pendingAnchors.contains(anchor)) {
+            pendingAnchors.add(anchor);
+        }
+        while (pendingAnchors.size() > 64) {
+            pendingAnchors.removeFirst();
+        }
     }
 
-    @Nullable public BlockPos pollAnchor() { return pendingAnchors.pollFirst(); }
+    @Nullable
+    public BlockPos pollAnchor() {
+        return pendingAnchors.pollFirst();
+    }
 
+    /** Exact-job dedup prevents overlapping delta regions from duplicating work. */
     public void enqueueSectionJobs(List<MountedScanSectionJob> jobs) {
         for (MountedScanSectionJob job : jobs) {
-            if (pendingSectionJobSet.add(job)) pendingSectionJobs.addLast(job);
+            if (pendingSectionJobSet.add(job)) {
+                pendingSectionJobs.addLast(job);
+            }
         }
     }
 
@@ -187,11 +250,18 @@ public final class MountedScanState {
         return activeSectionJob;
     }
 
-    public int sectionCursor() { return sectionCursor; }
-    public void advanceSectionCursor(int amount) { sectionCursor += amount; }
+    public int sectionCursor() {
+        return sectionCursor;
+    }
+
+    public void advanceSectionCursor(int amount) {
+        sectionCursor += amount;
+    }
 
     public void completeActiveSectionJob() {
-        if (activeSectionJob != null) pendingSectionJobSet.remove(activeSectionJob);
+        if (activeSectionJob != null) {
+            pendingSectionJobSet.remove(activeSectionJob);
+        }
         activeSectionJob = null;
         sectionCursor = 0;
     }
@@ -209,30 +279,54 @@ public final class MountedScanState {
 
     private void rebuildSectionJobSet() {
         pendingSectionJobSet.clear();
-        if (activeSectionJob != null) pendingSectionJobSet.add(activeSectionJob);
+        if (activeSectionJob != null) {
+            pendingSectionJobSet.add(activeSectionJob);
+        }
         pendingSectionJobSet.addAll(pendingSectionJobs);
     }
 
+    /**
+     * Starts a finite snapshot generation only when no generation is already
+     * active. Physics movement never restarts an in-flight generation. After it
+     * finishes, the next empty-queue pass computes only the delta between the
+     * completed snapshot and the miner's then-current bounds.
+     */
     public boolean startScanGenerationIfNeeded(MountedScanBounds currentBounds) {
         if (scanGenerationBounds != null) {
-            if (scanGenerationBounds.equals(currentBounds)) return false;
-            clearSectionBacklog();
-            scanGenerationBounds = null;
+            return false;
         }
-        if (completedScanBounds != null && completedScanBounds.equals(currentBounds)) return false;
+        if (completedScanBounds != null && completedScanBounds.equals(currentBounds)) {
+            return false;
+        }
         scanGenerationBounds = currentBounds;
         ticketSetCheckRequested = true;
         return true;
     }
 
-    @Nullable public MountedScanBounds completedScanBounds() { return completedScanBounds; }
-    @Nullable public MountedScanBounds scanGenerationBounds() { return scanGenerationBounds; }
-    public boolean hasScanGeneration() { return scanGenerationBounds != null; }
+    @Nullable
+    public MountedScanBounds completedScanBounds() {
+        return completedScanBounds;
+    }
+
+    @Nullable
+    public MountedScanBounds scanGenerationBounds() {
+        return scanGenerationBounds;
+    }
+
+    public boolean hasScanGeneration() {
+        return scanGenerationBounds != null;
+    }
 
     public void completeScanGeneration() {
-        if (scanGenerationBounds != null) completedScanBounds = scanGenerationBounds;
+        if (scanGenerationBounds != null) {
+            completedScanBounds = scanGenerationBounds;
+        }
         scanGenerationBounds = null;
         clearSectionBacklog();
+        // The next ticket evaluation must follow the live bounds again rather
+        // than the just-completed snapshot.
+        ticketSetCheckRequested = true;
+        lastPrunedBounds = null;
     }
 
     public void rememberTicketChunk(ChunkPos chunk) {
@@ -244,10 +338,14 @@ public final class MountedScanState {
         }
     }
 
-    public Set<ChunkPos> recentTicketChunks() { return Collections.unmodifiableSet(recentTicketChunks); }
+    public Set<ChunkPos> recentTicketChunks() {
+        return Collections.unmodifiableSet(recentTicketChunks);
+    }
 
     public boolean updateTicketCenterChunk(ChunkPos chunk) {
-        if (chunk.equals(lastTicketCenterChunk)) return false;
+        if (chunk.equals(lastTicketCenterChunk)) {
+            return false;
+        }
         lastTicketCenterChunk = chunk;
         return true;
     }
@@ -257,8 +355,13 @@ public final class MountedScanState {
         ticketSetCheckRequested = true;
     }
 
-    public boolean ticketsNeedEvaluation() { return ticketRefreshRequested || ticketSetCheckRequested; }
-    public boolean shouldRefreshTickets(Set<ChunkPos> desired) { return ticketRefreshRequested || !lastAppliedTicketChunks.equals(desired); }
+    public boolean ticketsNeedEvaluation() {
+        return ticketRefreshRequested || ticketSetCheckRequested;
+    }
+
+    public boolean shouldRefreshTickets(Set<ChunkPos> desired) {
+        return ticketRefreshRequested || !lastAppliedTicketChunks.equals(desired);
+    }
 
     public void markTicketsEvaluated(Set<ChunkPos> desired) {
         lastAppliedTicketChunks.clear();
@@ -269,12 +372,16 @@ public final class MountedScanState {
 
     public void enqueueTargets(List<MountedMiningTarget> targets, int maxTargets) {
         for (MountedMiningTarget target : targets) {
-            if (!queuedTargets.containsKey(target.pos()) && queuedTargets.size() >= maxTargets) return;
+            if (!queuedTargets.containsKey(target.pos()) && queuedTargets.size() >= maxTargets) {
+                return;
+            }
             queuedTargets.put(target.pos(), target);
         }
     }
 
-    public boolean hasQueuedTarget(BlockPos pos) { return queuedTargets.containsKey(pos); }
+    public boolean hasQueuedTarget(BlockPos pos) {
+        return queuedTargets.containsKey(pos);
+    }
 
     @Nullable
     public MountedMiningTarget peekTarget() {
@@ -282,10 +389,21 @@ public final class MountedScanState {
         return iterator.hasNext() ? iterator.next().getValue() : null;
     }
 
-    public void removeTarget(BlockPos pos) { queuedTargets.remove(pos); }
-    public int queuedTargetCount() { return queuedTargets.size(); }
-    public int lastSyncedQueueCount() { return lastSyncedQueueCount; }
-    public void markQueueCountSynced(int count) { lastSyncedQueueCount = count; }
+    public void removeTarget(BlockPos pos) {
+        queuedTargets.remove(pos);
+    }
+
+    public int queuedTargetCount() {
+        return queuedTargets.size();
+    }
+
+    public int lastSyncedQueueCount() {
+        return lastSyncedQueueCount;
+    }
+
+    public void markQueueCountSynced(int count) {
+        lastSyncedQueueCount = count;
+    }
 
     public void recordScanStats(int visitedPositions, int candidatePositions, int queuedSectionJobs, int skippedUnloadedSections, int skippedEmptySections, int skippedPaletteSections) {
         lastVisitedPositions = visitedPositions;
@@ -296,10 +414,27 @@ public final class MountedScanState {
         lastSkippedPaletteSections = skippedPaletteSections;
     }
 
-    public int lastVisitedPositions() { return lastVisitedPositions; }
-    public int lastCandidatePositions() { return lastCandidatePositions; }
-    public int lastQueuedSectionJobs() { return lastQueuedSectionJobs; }
-    public int lastSkippedUnloadedSections() { return lastSkippedUnloadedSections; }
-    public int lastSkippedEmptySections() { return lastSkippedEmptySections; }
-    public int lastSkippedPaletteSections() { return lastSkippedPaletteSections; }
+    public int lastVisitedPositions() {
+        return lastVisitedPositions;
+    }
+
+    public int lastCandidatePositions() {
+        return lastCandidatePositions;
+    }
+
+    public int lastQueuedSectionJobs() {
+        return lastQueuedSectionJobs;
+    }
+
+    public int lastSkippedUnloadedSections() {
+        return lastSkippedUnloadedSections;
+    }
+
+    public int lastSkippedEmptySections() {
+        return lastSkippedEmptySections;
+    }
+
+    public int lastSkippedPaletteSections() {
+        return lastSkippedPaletteSections;
+    }
 }

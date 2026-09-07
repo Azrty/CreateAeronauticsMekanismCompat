@@ -22,13 +22,30 @@ public final class ChunkTicketPolicy {
 
     public static Set<ChunkPos> digitalMinerChunks(MountedMekanismContext context, TileEntityDigitalMiner miner, MountedScanState state) {
         LinkedHashSet<ChunkPos> chunks = new LinkedHashSet<>();
-        MountedScanBounds bounds = MountedScanBounds.current(context, miner);
-        addDigitalMinerScanChunks(chunks, context, bounds);
-        for (ChunkPos recentChunk : state.recentTicketChunks()) {
+
+        // The live miner chunk always wins. A frozen scan generation may refer
+        // to an older ship position, but the block entity itself must never be
+        // sacrificed to finish that snapshot.
+        chunks.add(new ChunkPos(context.globalBlockPos()));
+
+        MountedScanBounds bounds = state.scanGenerationBounds();
+        if (bounds == null) {
+            bounds = MountedScanBounds.current(context, miner);
+        }
+
+        // If processing stopped on an unloaded job, prioritize the most recent
+        // requested chunks before the broad radius set. The old policy appended
+        // them after a full set and then trimmed, making the refresh ineffective
+        // whenever the configured ticket cap was already reached.
+        List<ChunkPos> recent = new ArrayList<>(state.recentTicketChunks());
+        Collections.reverse(recent);
+        for (ChunkPos recentChunk : recent) {
             if (bounds.intersects(recentChunk)) {
                 chunks.add(recentChunk);
             }
         }
+
+        addDigitalMinerScanChunks(chunks, bounds);
         return trim(chunks, CmcConfig.DIGITAL_MINER_MAX_TICKET_CHUNKS.get());
     }
 
@@ -77,12 +94,12 @@ public final class ChunkTicketPolicy {
                 .thenComparingInt(chunk -> Math.abs(chunk.z - center.z)));
     }
 
-    private static void addDigitalMinerScanChunks(LinkedHashSet<ChunkPos> chunks, MountedMekanismContext context, MountedScanBounds bounds) {
+    private static void addDigitalMinerScanChunks(LinkedHashSet<ChunkPos> chunks, MountedScanBounds bounds) {
         if (bounds.isEmpty()) {
             return;
         }
-        int centerX = BlockPos.containing(context.globalCenter()).getX();
-        int centerZ = BlockPos.containing(context.globalCenter()).getZ();
+        int centerX = (bounds.minX() + bounds.maxX()) >> 1;
+        int centerZ = (bounds.minZ() + bounds.maxZ()) >> 1;
         int centerChunkX = SectionPos.blockToSectionCoord(centerX);
         int centerChunkZ = SectionPos.blockToSectionCoord(centerZ);
 

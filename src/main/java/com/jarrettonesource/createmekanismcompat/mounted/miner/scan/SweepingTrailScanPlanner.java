@@ -17,6 +17,11 @@ import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.block.state.BlockState;
 
+/**
+ * v5 delta planner. A fully scanned cuboid is cached; when the mounted miner
+ * moves, only currentBounds - completedBounds is scheduled. No periodic trail
+ * re-scan occurs while usable targets remain queued.
+ */
 public final class SweepingTrailScanPlanner {
     private static final int TIME_CHECK_INTERVAL = 256;
 
@@ -38,12 +43,23 @@ public final class SweepingTrailScanPlanner {
             for (MountedScanBounds region : deltaRegions) {
                 state.enqueueSectionJobs(sectionJobs(context, miner, region, center, stats));
             }
+            // Current area is already wholly contained by the completed cache.
             if (!state.hasScanBacklog()) {
                 state.completeScanGeneration();
                 state.recordScanStats(0, 0, stats.queuedSectionJobs, 0, stats.skippedEmptySections, stats.skippedPaletteSections);
                 return targets;
             }
         } else if (!state.hasScanGeneration()) {
+            // Same fully scanned/exhausted bounds as last time: O(1) no-op.
+            state.recordScanStats(0, 0, 0, 0, 0, 0);
+            return targets;
+        }
+
+        // Freeze the geometry for the lifetime of this generation. Physics may
+        // move the miner while the work is split across ticks, but movement is
+        // handled by a later delta generation rather than restarting this one.
+        MountedScanBounds scanBounds = state.scanGenerationBounds();
+        if (scanBounds == null) {
             state.recordScanStats(0, 0, 0, 0, 0, 0);
             return targets;
         }
@@ -58,6 +74,8 @@ public final class SweepingTrailScanPlanner {
             state.rememberTicketChunk(job.chunkPos());
             LevelChunk chunk = context.level().getChunkSource().getChunkNow(job.chunkX(), job.chunkZ());
             if (chunk == null) {
+                // Never discard an unloaded section: keeping this job/cursor is
+                // what prevents the delta cache from falsely considering it scanned.
                 stats.skippedUnloadedSections++;
                 state.requestTicketRefresh();
                 break;
@@ -79,7 +97,7 @@ public final class SweepingTrailScanPlanner {
                 int cursor = state.sectionCursor() + inspected;
                 BlockPos pos = job.posAt(cursor);
                 stats.visitedPositions++;
-                if (!currentBounds.contains(pos)) {
+                if (!scanBounds.contains(pos)) {
                     continue;
                 }
                 BlockState blockState = section.getBlockState(job.localXAt(cursor), job.localYAt(cursor), job.localZAt(cursor));
@@ -102,6 +120,11 @@ public final class SweepingTrailScanPlanner {
         return targets;
     }
 
+    /**
+     * Exact non-overlapping decomposition of current - previous. At most six
+     * cuboids are produced, so a 1-block movement becomes a thin strip rather
+     * than another full miner volume.
+     */
     private List<MountedScanBounds> deltaRegions(MountedScanBounds current, MountedScanBounds previous) {
         if (previous == null || previous.isEmpty()) {
             return List.of(current);
@@ -112,28 +135,40 @@ public final class SweepingTrailScanPlanner {
         }
 
         List<MountedScanBounds> regions = new ArrayList<>(6);
-        addIfNonEmpty(regions, new MountedScanBounds(current.minX(), overlap.minX() - 1,
+        addIfNonEmpty(regions, new MountedScanBounds(
+                current.minX(), overlap.minX() - 1,
                 current.minY(), current.maxY(), current.minZ(), current.maxZ()));
-        addIfNonEmpty(regions, new MountedScanBounds(overlap.maxX() + 1, current.maxX(),
+        addIfNonEmpty(regions, new MountedScanBounds(
+                overlap.maxX() + 1, current.maxX(),
                 current.minY(), current.maxY(), current.minZ(), current.maxZ()));
-        addIfNonEmpty(regions, new MountedScanBounds(overlap.minX(), overlap.maxX(),
+
+        addIfNonEmpty(regions, new MountedScanBounds(
+                overlap.minX(), overlap.maxX(),
                 current.minY(), overlap.minY() - 1, current.minZ(), current.maxZ()));
-        addIfNonEmpty(regions, new MountedScanBounds(overlap.minX(), overlap.maxX(),
+        addIfNonEmpty(regions, new MountedScanBounds(
+                overlap.minX(), overlap.maxX(),
                 overlap.maxY() + 1, current.maxY(), current.minZ(), current.maxZ()));
-        addIfNonEmpty(regions, new MountedScanBounds(overlap.minX(), overlap.maxX(), overlap.minY(), overlap.maxY(),
+
+        addIfNonEmpty(regions, new MountedScanBounds(
+                overlap.minX(), overlap.maxX(), overlap.minY(), overlap.maxY(),
                 current.minZ(), overlap.minZ() - 1));
-        addIfNonEmpty(regions, new MountedScanBounds(overlap.minX(), overlap.maxX(), overlap.minY(), overlap.maxY(),
+        addIfNonEmpty(regions, new MountedScanBounds(
+                overlap.minX(), overlap.maxX(), overlap.minY(), overlap.maxY(),
                 overlap.maxZ() + 1, current.maxZ()));
         return regions;
     }
 
     private static void addIfNonEmpty(List<MountedScanBounds> regions, MountedScanBounds bounds) {
-        if (!bounds.isEmpty()) regions.add(bounds);
+        if (!bounds.isEmpty()) {
+            regions.add(bounds);
+        }
     }
 
     private List<MountedScanSectionJob> sectionJobs(MountedMekanismContext context, TileEntityDigitalMiner miner,
             MountedScanBounds scanBounds, BlockPos center, ScanStats stats) {
-        if (scanBounds.isEmpty()) return List.of();
+        if (scanBounds.isEmpty()) {
+            return List.of();
+        }
         int minX = scanBounds.minX();
         int maxX = scanBounds.maxX();
         int minY = scanBounds.minY();
@@ -147,7 +182,9 @@ public final class SweepingTrailScanPlanner {
         ServerLevel level = context.level();
         for (int sectionY : sectionYs) {
             int sectionIndex = level.getSectionIndexFromSectionY(sectionY);
-            if (sectionIndex < 0) continue;
+            if (sectionIndex < 0) {
+                continue;
+            }
             for (ChunkPos chunkPos : chunks) {
                 int sectionMinX = chunkPos.getMinBlockX();
                 int sectionMaxX = chunkPos.getMaxBlockX();
@@ -156,17 +193,22 @@ public final class SweepingTrailScanPlanner {
                 int sectionMinZ = chunkPos.getMinBlockZ();
                 int sectionMaxZ = chunkPos.getMaxBlockZ();
                 MountedScanSectionJob job = new MountedScanSectionJob(
-                        chunkPos.x, chunkPos.z, sectionY,
+                        chunkPos.x,
+                        chunkPos.z,
+                        sectionY,
                         Math.max(minX, sectionMinX) - sectionMinX,
                         Math.min(maxX, sectionMaxX) - sectionMinX,
                         Math.max(minY, sectionMinY) - sectionMinY,
                         Math.min(maxY, sectionMaxY) - sectionMinY,
                         Math.max(minZ, sectionMinZ) - sectionMinZ,
-                        Math.min(maxZ, sectionMaxZ) - sectionMinZ);
+                        Math.min(maxZ, sectionMaxZ) - sectionMinZ
+                );
 
                 LevelChunk chunk = level.getChunkSource().getChunkNow(chunkPos.x, chunkPos.z);
                 if (chunk != null) {
-                    if (sectionIndex >= chunk.getSections().length) continue;
+                    if (sectionIndex >= chunk.getSections().length) {
+                        continue;
+                    }
                     LevelChunkSection section = chunk.getSection(sectionIndex);
                     if (section.hasOnlyAir()) {
                         stats.skippedEmptySections++;
@@ -177,6 +219,8 @@ public final class SweepingTrailScanPlanner {
                         continue;
                     }
                 }
+                // If the chunk is unloaded, enqueue the geometric job instead
+                // of dropping it. Processing will pause and request tickets.
                 jobs.add(job);
             }
         }
@@ -208,7 +252,9 @@ public final class SweepingTrailScanPlanner {
         int minSectionY = SectionPos.blockToSectionCoord(minY);
         int maxSectionY = SectionPos.blockToSectionCoord(maxY);
         List<Integer> sectionYs = new ArrayList<>();
-        for (int sectionY = minSectionY; sectionY <= maxSectionY; sectionY++) sectionYs.add(sectionY);
+        for (int sectionY = minSectionY; sectionY <= maxSectionY; sectionY++) {
+            sectionYs.add(sectionY);
+        }
         return sectionYs;
     }
 
