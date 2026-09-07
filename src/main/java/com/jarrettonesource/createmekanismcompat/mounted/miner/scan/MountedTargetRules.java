@@ -3,6 +3,7 @@ package com.jarrettonesource.createmekanismcompat.mounted.miner.scan;
 import com.jarrettonesource.createmekanismcompat.mounted.MountedMekanismContext;
 import com.jarrettonesource.createmekanismcompat.mounted.miner.MountedMiningTarget;
 import dev.ryanhcode.sable.Sable;
+import java.util.IdentityHashMap;
 import mekanism.common.content.miner.MinerFilter;
 import mekanism.common.tags.MekanismTags;
 import mekanism.common.tile.machine.TileEntityDigitalMiner;
@@ -33,6 +34,34 @@ public final class MountedTargetRules {
             return null;
         }
         MinerFilter<?> matchingFilter = matchingFilter(miner, state);
+        if (!matchesMinerMode(miner, matchingFilter)) {
+            return null;
+        }
+        if (pos.equals(context.globalBlockPos())) {
+            return null;
+        }
+        if (context.subLevel().equals(Sable.HELPER.getContaining(context.level(), pos))) {
+            return null;
+        }
+        if (state.getDestroySpeed(context.level(), pos) < 0) {
+            return null;
+        }
+        return new MountedMiningTarget(pos, state, matchingFilter);
+    }
+
+    static @Nullable MountedMiningTarget resolveBatchCached(MountedMekanismContext context, TileEntityDigitalMiner miner,
+            BlockPos pos, BlockState state, IdentityHashMap<BlockState, MinerFilter<?>> filterCache) {
+        if (isNeverTarget(miner, state)) {
+            return null;
+        }
+
+        MinerFilter<?> matchingFilter;
+        if (filterCache.containsKey(state)) {
+            matchingFilter = filterCache.get(state);
+        } else {
+            matchingFilter = matchingFilter(miner, state);
+            filterCache.put(state, matchingFilter);
+        }
         if (!matchesMinerMode(miner, matchingFilter)) {
             return null;
         }
