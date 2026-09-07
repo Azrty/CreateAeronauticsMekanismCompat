@@ -9,6 +9,7 @@ import java.util.List;
 import mekanism.common.tile.machine.TileEntityDigitalMiner;
 import mekanism.common.util.WorldUtils;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.state.BlockState;
 import org.jetbrains.annotations.Nullable;
@@ -79,7 +80,9 @@ public final class MountedDigitalMinerController {
     }
 
     private static @Nullable MountedMiningTarget resolveTarget(MountedMekanismContext context, TileEntityDigitalMiner miner, BlockPos pos) {
-        BlockState state = WorldUtils.getBlockStateIfLoaded(context.level(), pos);
+        // WorldUtils declares this overload against BlockGetter. Keep the cast explicit so the generated
+        // JVM descriptor cannot accidentally bind to a stub-only ServerLevel overload in local patch builds.
+        BlockState state = WorldUtils.getBlockStateIfLoaded((BlockGetter) context.level(), pos);
         return state == null ? null : MountedTargetRules.resolve(context, miner, pos, state);
     }
 }
