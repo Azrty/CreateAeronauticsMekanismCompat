@@ -13,6 +13,8 @@
     "BlockTileAssemblyMixin",
     "ChemicalNetworkAssemblyMoveMixin",
     "TileEntityDigitalMinerMixin",
+    "TileEntityDigitalMinerTargetAccessor",
+    "ThreadMinerSearchMixin",
     "TileEntityBasicLaserMixin",
     "RadiationManagerAssemblyMoveMixin",
     "SubLevelPhysicsSystemMixin",
