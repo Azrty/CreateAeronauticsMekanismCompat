@@ -87,10 +87,7 @@ public final class MountedDigitalMinerControllers {
         }
         state.updateMinerChunkLoaded(true);
         CONTROLLER.scan(mounted, miner, state);
-        miner.searcher.found = state.queuedTargetCount();
-        miner.searcher.state = state.queuedTargetCount() == 0 && state.hasScanGeneration()
-                ? State.SEARCHING
-                : State.FINISHED;
+        syncSearcherState(miner, state);
         syncOreMap(miner, state);
         refreshTicketsIfNeeded(miner, mounted, state);
 
@@ -115,20 +112,26 @@ public final class MountedDigitalMinerControllers {
             return true;
         }
         MountedScanState state = stateFor(mounted);
-        int queueBefore = state.queuedTargetCount();
         CONTROLLER.mine(mounted, miner, state);
-        if (queueBefore > 0 && state.queuedTargetCount() == 0) {
-            state.reset();
-            state.updateScanSignature(scanSignature(miner));
-        }
 
-        miner.searcher.found = state.queuedTargetCount();
-        miner.searcher.state = state.queuedTargetCount() == 0
-                ? State.SEARCHING
-                : State.FINISHED;
+        syncSearcherState(miner, state);
         syncOreMap(miner, state);
         refreshTicketsIfNeeded(miner, mounted, state);
         return true;
+    }
+
+    private static void syncSearcherState(TileEntityDigitalMiner miner, MountedScanState state) {
+        int count = state.queuedTargetCount();
+        int maxQueue = CmcConfig.DIGITAL_MINER_MAX_TARGET_QUEUE.get();
+        miner.searcher.found = count;
+
+        if (state.hasScanGeneration() && count < maxQueue) {
+            miner.searcher.state = State.SEARCHING;
+        } else if (count > 0) {
+            miner.searcher.state = State.FINISHED;
+        } else {
+            miner.searcher.state = state.hasScanGeneration() ? State.SEARCHING : State.FINISHED;
+        }
     }
 
     public static Optional<Set<ChunkPos>> mountedChunkSet(TileEntityDigitalMiner miner) {
