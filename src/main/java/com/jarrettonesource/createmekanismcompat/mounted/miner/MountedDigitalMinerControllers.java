@@ -30,15 +30,12 @@ public final class MountedDigitalMinerControllers {
         TileEntityDigitalMinerAccessor access = (TileEntityDigitalMinerAccessor) miner;
         access.cmc$setRunning(true);
         miner.searcher.state = State.FINISHED;
+
         MountedScanState state = stateFor(mounted);
-        if (canEverMine(miner)) {
-            state.updateAnchors(mounted.globalCenter(), CmcConfig.DIGITAL_MINER_TRAIL_SAMPLES.get());
-            syncOreMap(miner, state);
-        } else {
-            clearOreMap(miner);
-        }
-        state.updateTicketCenterChunk(new ChunkPos(mounted.globalBlockPos()));
-        miner.getChunkLoader().refreshChunkTickets();
+        state.reset();
+        state.updateScanSignature(scanSignature(miner));
+        syncOreMap(miner, state);
+        refreshTicketsIfNeeded(miner, mounted, state);
         miner.setChanged();
         return true;
     }
@@ -48,27 +45,47 @@ public final class MountedDigitalMinerControllers {
         if (mounted == null) {
             return false;
         }
+
+        MountedMinerKey key = MountedMinerKey.from(mounted);
         if (!miner.isRunning()) {
-            MountedScanState state = stateFor(mounted);
-            state.reset();
-            clearOreMap(miner);
+            STATES.remove(key);
+            if (miner.getToMine() != 0) {
+                clearOreMap(miner);
+            }
             return true;
         }
         if (!canEverMine(miner)) {
-            stateFor(mounted).reset();
-            clearOreMap(miner);
+            STATES.remove(key);
+            if (miner.getToMine() != 0) {
+                clearOreMap(miner);
+            }
             return true;
         }
-        MountedScanState state = stateFor(mounted);
-        state.updateAnchors(mounted.globalCenter(), CmcConfig.DIGITAL_MINER_TRAIL_SAMPLES.get());
+
+        MountedScanState state = STATES.computeIfAbsent(key, ignored -> new MountedScanState());
         int queueBefore = state.queuedTargetCount();
-        CONTROLLER.scan(mounted, miner, state);
-        syncOreMap(miner, state);
+        state.updateScanSignature(scanSignature(miner));
 
         ChunkPos currentGlobalChunk = new ChunkPos(mounted.globalBlockPos());
-        if (state.updateTicketCenterChunk(currentGlobalChunk) || state.lastVisitedPositions() > 0) {
-            miner.getChunkLoader().refreshChunkTickets();
+        boolean projectedChunkLoaded = mounted.level().getChunkSource().getChunkNow(
+                currentGlobalChunk.x, currentGlobalChunk.z) != null;
+        if (!projectedChunkLoaded) {
+            if (state.minerChunkLoaded()) {
+                state.invalidateForMinerChunkUnload();
+            }
+            syncOreMap(miner, state);
+            refreshTicketsIfNeeded(miner, mounted, state);
+            if (queueBefore != state.queuedTargetCount()) {
+                miner.setChanged();
+            }
+            return true;
         }
+        state.updateMinerChunkLoaded(true);
+
+        CONTROLLER.scan(mounted, miner, state);
+        syncOreMap(miner, state);
+        refreshTicketsIfNeeded(miner, mounted, state);
+
         if (state.queuedTargetCount() != queueBefore) {
             miner.setChanged();
         }
@@ -81,18 +98,16 @@ public final class MountedDigitalMinerControllers {
             return false;
         }
         if (!canEverMine(miner)) {
-            stateFor(mounted).reset();
-            clearOreMap(miner);
+            STATES.remove(MountedMinerKey.from(mounted));
+            if (miner.getToMine() != 0) {
+                clearOreMap(miner);
+            }
             return true;
         }
         MountedScanState state = stateFor(mounted);
         CONTROLLER.mine(mounted, miner, state);
         syncOreMap(miner, state);
-
-        ChunkPos currentGlobalChunk = new ChunkPos(mounted.globalBlockPos());
-        if (state.updateTicketCenterChunk(currentGlobalChunk) || state.lastVisitedPositions() > 0) {
-            miner.getChunkLoader().refreshChunkTickets();
-        }
+        refreshTicketsIfNeeded(miner, mounted, state);
         return true;
     }
 
@@ -129,6 +144,33 @@ public final class MountedDigitalMinerControllers {
         return STATES.computeIfAbsent(MountedMinerKey.from(context), key -> new MountedScanState());
     }
 
+    private static long scanSignature(TileEntityDigitalMiner miner) {
+        long h = 0xcbf29ce484222325L;
+        h = mix(h, miner.getRadius());
+        h = mix(h, miner.getMinY());
+        h = mix(h, miner.getMaxY());
+        h = mix(h, miner.getInverse() ? 1 : 0);
+        h = mix(h, miner.getInverseRequiresReplacement() ? 1 : 0);
+        h = mix(h, System.identityHashCode(miner.getInverseReplaceTarget()));
+        h = mix(h, miner.getFilterManager().getFilters().hashCode());
+        return h;
+    }
+
+    private static long mix(long hash, int value) {
+        return (hash ^ (value & 0xffffffffL)) * 0x100000001b3L;
+    }
+
+    private static void refreshTicketsIfNeeded(TileEntityDigitalMiner miner, MountedMekanismContext mounted, MountedScanState state) {
+        if (!state.ticketsNeedEvaluation()) {
+            return;
+        }
+        Set<ChunkPos> desired = ChunkTicketPolicy.digitalMinerChunks(mounted, miner, state);
+        if (state.shouldRefreshTickets(desired)) {
+            miner.getChunkLoader().refreshChunkTickets();
+        }
+        state.markTicketsEvaluated(desired);
+    }
+
     private static void installSentinelOreMap(TileEntityDigitalMiner miner, int toMineCount) {
         Long2ObjectOpenHashMap<BitSet> oresToMine = new Long2ObjectOpenHashMap<>();
         BitSet bitSet = new BitSet();
@@ -146,10 +188,21 @@ public final class MountedDigitalMinerControllers {
     }
 
     private static void syncOreMap(TileEntityDigitalMiner miner, MountedScanState state) {
-        if (state.queuedTargetCount() > 0) {
-            installSentinelOreMap(miner, state.queuedTargetCount());
-        } else {
-            clearOreMap(miner);
+        int count = state.queuedTargetCount();
+        int previous = state.lastSyncedQueueCount();
+        if (count == previous) {
+            return;
         }
+        TileEntityDigitalMinerAccessor access = (TileEntityDigitalMinerAccessor) miner;
+        if (count <= 0) {
+            if (previous != 0) {
+                clearOreMap(miner);
+            }
+        } else if (previous <= 0 || previous == Integer.MIN_VALUE) {
+            installSentinelOreMap(miner, count);
+        } else {
+            access.cmc$setCachedToMine(count);
+        }
+        state.markQueueCountSynced(count);
     }
 }

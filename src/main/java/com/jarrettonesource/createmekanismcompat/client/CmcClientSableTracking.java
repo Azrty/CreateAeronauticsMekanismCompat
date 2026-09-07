@@ -1,6 +1,5 @@
 package com.jarrettonesource.createmekanismcompat.client;
 
-import com.jarrettonesource.createmekanismcompat.CreateMekanismCompat;
 import com.jarrettonesource.createmekanismcompat.network.MekanismTeleportSableStatePayload;
 import dev.ryanhcode.sable.api.entity.EntitySubLevelUtil;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
@@ -9,37 +8,62 @@ import dev.ryanhcode.sable.mixinterface.entity.entity_sublevel_collision.EntityM
 import dev.ryanhcode.sable.sublevel.SubLevel;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
-import net.minecraft.world.phys.Vec3;
 
 public final class CmcClientSableTracking {
-    private CmcClientSableTracking() {
-    }
+    private static volatile MekanismTeleportSableStatePayload pending;
+
+    private CmcClientSableTracking() {}
 
     public static void applyTeleportState(MekanismTeleportSableStatePayload payload) {
         LocalPlayer player = Minecraft.getInstance().player;
         if (player == null) {
+            pending = payload.insideSubLevel() ? payload : null;
             return;
         }
 
         if (payload.insideSubLevel()) {
             SubLevel subLevel = resolveSubLevel(player, payload);
             if (subLevel == null || subLevel.isRemoved()) {
-                CreateMekanismCompat.LOGGER.warn("Mekanism teleporter target sublevel {} is not tracked on the client", payload.subLevelId());
-                clear(player);
+                // The target ship can arrive on the client a few packets after Mekanism's teleport packet.
+                // Keep the sublevel id pending instead of clearing it permanently.
+                pending = payload;
+                unpin(player);
+                if (player instanceof EntityMovementExtension movement) {
+                    movement.sable$setTrackingSubLevel(null);
+                    movement.sable$setLastTrackingSubLevelID(payload.subLevelId());
+                }
+                EntitySubLevelUtil.setOldPosNoMovement(player);
                 return;
             }
-            if (player instanceof EntityStickExtension stick) {
-                stick.sable$setPlotPosition(new Vec3(payload.localX(), payload.localY(), payload.localZ()));
-            }
-            if (player instanceof EntityMovementExtension movement) {
-                movement.sable$setTrackingSubLevel(subLevel);
-                movement.sable$setLastTrackingSubLevelID(payload.subLevelId());
-            }
+            pending = null;
+            applyResolved(player, payload, subLevel);
         } else {
+            pending = null;
             clear(player);
         }
-
         EntitySubLevelUtil.setOldPosNoMovement(player);
+    }
+
+    /** Retry a teleport whose target Sable sublevel had not reached the client yet. */
+    public static void retryPending() {
+        MekanismTeleportSableStatePayload payload = pending;
+        if (payload == null || !payload.insideSubLevel()) return;
+        LocalPlayer player = Minecraft.getInstance().player;
+        if (player == null) return;
+        SubLevel subLevel = resolveSubLevel(player, payload);
+        if (subLevel == null || subLevel.isRemoved()) return;
+        pending = null;
+        applyResolved(player, payload, subLevel);
+        EntitySubLevelUtil.setOldPosNoMovement(player);
+    }
+
+    private static void applyResolved(LocalPlayer player, MekanismTeleportSableStatePayload payload, SubLevel subLevel) {
+        // Never assign plotPosition here: Sable treats it as a hard per-tick position lock.
+        unpin(player);
+        if (player instanceof EntityMovementExtension movement) {
+            movement.sable$setTrackingSubLevel(subLevel);
+            movement.sable$setLastTrackingSubLevelID(payload.subLevelId());
+        }
     }
 
     private static SubLevel resolveSubLevel(LocalPlayer player, MekanismTeleportSableStatePayload payload) {
@@ -47,10 +71,14 @@ public final class CmcClientSableTracking {
         return container == null ? null : container.getSubLevel(payload.subLevelId());
     }
 
-    private static void clear(LocalPlayer player) {
+    private static void unpin(LocalPlayer player) {
         if (player instanceof EntityStickExtension stick) {
             stick.sable$setPlotPosition(null);
         }
+    }
+
+    private static void clear(LocalPlayer player) {
+        unpin(player);
         if (player instanceof EntityMovementExtension movement) {
             movement.sable$setTrackingSubLevel(null);
             movement.sable$setLastTrackingSubLevelID(null);

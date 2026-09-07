@@ -1,6 +1,5 @@
 package com.jarrettonesource.createmekanismcompat.mounted.miner.scan;
 
-import com.jarrettonesource.createmekanismcompat.config.CmcConfig;
 import com.jarrettonesource.createmekanismcompat.mounted.MountedMekanismContext;
 import com.jarrettonesource.createmekanismcompat.mounted.miner.MountedMiningTarget;
 import com.jarrettonesource.createmekanismcompat.mounted.miner.MountedScanBounds;
@@ -21,35 +20,47 @@ import net.minecraft.world.level.block.state.BlockState;
 public final class SweepingTrailScanPlanner {
     private static final int TIME_CHECK_INTERVAL = 256;
 
-    public List<MountedMiningTarget> nextBatch(MountedMekanismContext context, TileEntityDigitalMiner miner, MountedScanState state, int budget, int targetLimit, long deadlineNanos) {
-        state.updateAnchors(context.globalCenter(), CmcConfig.DIGITAL_MINER_TRAIL_SAMPLES.get());
+    public List<MountedMiningTarget> nextBatch(MountedMekanismContext context, TileEntityDigitalMiner miner,
+            MountedScanState state, int budget, int targetLimit, long deadlineNanos) {
         MountedScanBounds currentBounds = MountedScanBounds.current(context, miner);
-        state.pruneOutside(currentBounds, miner.getRadius(), miner.getDiameter());
         List<MountedMiningTarget> targets = new ArrayList<>(Math.max(0, Math.min(budget, targetLimit)));
-        if (budget <= 0 || targetLimit <= 0 || currentBounds.isEmpty() || miner.getTotalSize() <= 0 || miner.getDiameter() <= 0 || miner.getMaxY() < miner.getMinY()) {
+        if (budget <= 0 || targetLimit <= 0 || currentBounds.isEmpty() || miner.getTotalSize() <= 0
+                || miner.getDiameter() <= 0 || miner.getMaxY() < miner.getMinY()) {
             state.recordScanStats(0, 0, 0, 0, 0, 0);
             return targets;
         }
 
         ScanStats stats = new ScanStats();
+        boolean startedGeneration = state.startScanGenerationIfNeeded(currentBounds);
+        if (startedGeneration) {
+            List<MountedScanBounds> deltaRegions = deltaRegions(currentBounds, state.completedScanBounds());
+            BlockPos center = BlockPos.containing(context.globalCenter());
+            for (MountedScanBounds region : deltaRegions) {
+                state.enqueueSectionJobs(sectionJobs(context, miner, region, center, stats));
+            }
+            if (!state.hasScanBacklog()) {
+                state.completeScanGeneration();
+                state.recordScanStats(0, 0, stats.queuedSectionJobs, 0, stats.skippedEmptySections, stats.skippedPaletteSections);
+                return targets;
+            }
+        } else if (!state.hasScanGeneration()) {
+            state.recordScanStats(0, 0, 0, 0, 0, 0);
+            return targets;
+        }
+
         while (stats.visitedPositions < budget && targets.size() < targetLimit && System.nanoTime() < deadlineNanos) {
             MountedScanSectionJob job = state.activeSectionJob();
             if (job == null) {
-                BlockPos anchor = state.pollAnchor();
-                if (anchor == null) {
-                    break;
-                }
-                List<MountedScanSectionJob> jobs = sectionJobs(context, miner, anchor, currentBounds, stats);
-                state.enqueueSectionJobs(jobs);
-                continue;
+                state.completeScanGeneration();
+                break;
             }
 
             state.rememberTicketChunk(job.chunkPos());
             LevelChunk chunk = context.level().getChunkSource().getChunkNow(job.chunkX(), job.chunkZ());
             if (chunk == null) {
-                state.completeActiveSectionJob();
                 stats.skippedUnloadedSections++;
-                continue;
+                state.requestTicketRefresh();
+                break;
             }
             int sectionIndex = context.level().getSectionIndexFromSectionY(job.sectionY());
             if (sectionIndex < 0 || sectionIndex >= chunk.getSections().length) {
@@ -65,8 +76,7 @@ public final class SweepingTrailScanPlanner {
                 if ((stats.visitedPositions & (TIME_CHECK_INTERVAL - 1)) == 0 && System.nanoTime() >= deadlineNanos) {
                     break;
                 }
-                int i = inspected;
-                int cursor = state.sectionCursor() + i;
+                int cursor = state.sectionCursor() + inspected;
                 BlockPos pos = job.posAt(cursor);
                 stats.visitedPositions++;
                 if (!currentBounds.contains(pos)) {
@@ -83,15 +93,47 @@ public final class SweepingTrailScanPlanner {
                 state.completeActiveSectionJob();
             }
         }
-        state.recordScanStats(stats.visitedPositions, targets.size(), stats.queuedSectionJobs, stats.skippedUnloadedSections, stats.skippedEmptySections, stats.skippedPaletteSections);
+
+        if (!state.hasScanBacklog() && state.hasScanGeneration()) {
+            state.completeScanGeneration();
+        }
+        state.recordScanStats(stats.visitedPositions, targets.size(), stats.queuedSectionJobs,
+                stats.skippedUnloadedSections, stats.skippedEmptySections, stats.skippedPaletteSections);
         return targets;
     }
 
-    private List<MountedScanSectionJob> sectionJobs(MountedMekanismContext context, TileEntityDigitalMiner miner, BlockPos anchor, MountedScanBounds currentBounds, ScanStats stats) {
-        MountedScanBounds scanBounds = MountedScanBounds.aroundAnchor(context, miner, anchor).intersection(currentBounds);
-        if (scanBounds.isEmpty()) {
-            return List.of();
+    private List<MountedScanBounds> deltaRegions(MountedScanBounds current, MountedScanBounds previous) {
+        if (previous == null || previous.isEmpty()) {
+            return List.of(current);
         }
+        MountedScanBounds overlap = current.intersection(previous);
+        if (overlap.isEmpty()) {
+            return List.of(current);
+        }
+
+        List<MountedScanBounds> regions = new ArrayList<>(6);
+        addIfNonEmpty(regions, new MountedScanBounds(current.minX(), overlap.minX() - 1,
+                current.minY(), current.maxY(), current.minZ(), current.maxZ()));
+        addIfNonEmpty(regions, new MountedScanBounds(overlap.maxX() + 1, current.maxX(),
+                current.minY(), current.maxY(), current.minZ(), current.maxZ()));
+        addIfNonEmpty(regions, new MountedScanBounds(overlap.minX(), overlap.maxX(),
+                current.minY(), overlap.minY() - 1, current.minZ(), current.maxZ()));
+        addIfNonEmpty(regions, new MountedScanBounds(overlap.minX(), overlap.maxX(),
+                overlap.maxY() + 1, current.maxY(), current.minZ(), current.maxZ()));
+        addIfNonEmpty(regions, new MountedScanBounds(overlap.minX(), overlap.maxX(), overlap.minY(), overlap.maxY(),
+                current.minZ(), overlap.minZ() - 1));
+        addIfNonEmpty(regions, new MountedScanBounds(overlap.minX(), overlap.maxX(), overlap.minY(), overlap.maxY(),
+                overlap.maxZ() + 1, current.maxZ()));
+        return regions;
+    }
+
+    private static void addIfNonEmpty(List<MountedScanBounds> regions, MountedScanBounds bounds) {
+        if (!bounds.isEmpty()) regions.add(bounds);
+    }
+
+    private List<MountedScanSectionJob> sectionJobs(MountedMekanismContext context, TileEntityDigitalMiner miner,
+            MountedScanBounds scanBounds, BlockPos center, ScanStats stats) {
+        if (scanBounds.isEmpty()) return List.of();
         int minX = scanBounds.minX();
         int maxX = scanBounds.maxX();
         int minY = scanBounds.minY();
@@ -99,61 +141,56 @@ public final class SweepingTrailScanPlanner {
         int minZ = scanBounds.minZ();
         int maxZ = scanBounds.maxZ();
 
-        List<ChunkPos> chunks = chunksInRange(minX, maxX, minZ, maxZ, anchor);
+        List<ChunkPos> chunks = chunksInRange(minX, maxX, minZ, maxZ, center);
         List<Integer> sectionYs = sectionYsInRange(minY, maxY);
         List<MountedScanSectionJob> jobs = new ArrayList<>();
         ServerLevel level = context.level();
         for (int sectionY : sectionYs) {
             int sectionIndex = level.getSectionIndexFromSectionY(sectionY);
+            if (sectionIndex < 0) continue;
             for (ChunkPos chunkPos : chunks) {
-                LevelChunk chunk = level.getChunkSource().getChunkNow(chunkPos.x, chunkPos.z);
-                if (chunk == null) {
-                    stats.skippedUnloadedSections++;
-                    continue;
-                }
-                if (sectionIndex < 0 || sectionIndex >= chunk.getSections().length) {
-                    continue;
-                }
-                LevelChunkSection section = chunk.getSection(sectionIndex);
-                if (section.hasOnlyAir()) {
-                    stats.skippedEmptySections++;
-                    continue;
-                }
-                if (!section.maybeHas(state -> MountedTargetRules.mayMatchMiner(miner, state))) {
-                    stats.skippedPaletteSections++;
-                    continue;
-                }
-
                 int sectionMinX = chunkPos.getMinBlockX();
                 int sectionMaxX = chunkPos.getMaxBlockX();
                 int sectionMinY = sectionY << 4;
                 int sectionMaxY = sectionMinY + 15;
                 int sectionMinZ = chunkPos.getMinBlockZ();
                 int sectionMaxZ = chunkPos.getMaxBlockZ();
-                jobs.add(new MountedScanSectionJob(
-                        chunkPos.x,
-                        chunkPos.z,
-                        sectionY,
+                MountedScanSectionJob job = new MountedScanSectionJob(
+                        chunkPos.x, chunkPos.z, sectionY,
                         Math.max(minX, sectionMinX) - sectionMinX,
                         Math.min(maxX, sectionMaxX) - sectionMinX,
                         Math.max(minY, sectionMinY) - sectionMinY,
                         Math.min(maxY, sectionMaxY) - sectionMinY,
                         Math.max(minZ, sectionMinZ) - sectionMinZ,
-                        Math.min(maxZ, sectionMaxZ) - sectionMinZ
-                ));
+                        Math.min(maxZ, sectionMaxZ) - sectionMinZ);
+
+                LevelChunk chunk = level.getChunkSource().getChunkNow(chunkPos.x, chunkPos.z);
+                if (chunk != null) {
+                    if (sectionIndex >= chunk.getSections().length) continue;
+                    LevelChunkSection section = chunk.getSection(sectionIndex);
+                    if (section.hasOnlyAir()) {
+                        stats.skippedEmptySections++;
+                        continue;
+                    }
+                    if (!section.maybeHas(state -> MountedTargetRules.mayMatchMiner(miner, state))) {
+                        stats.skippedPaletteSections++;
+                        continue;
+                    }
+                }
+                jobs.add(job);
             }
         }
         stats.queuedSectionJobs += jobs.size();
         return jobs;
     }
 
-    private List<ChunkPos> chunksInRange(int minX, int maxX, int minZ, int maxZ, BlockPos anchor) {
+    private List<ChunkPos> chunksInRange(int minX, int maxX, int minZ, int maxZ, BlockPos center) {
         int minChunkX = SectionPos.blockToSectionCoord(minX);
         int maxChunkX = SectionPos.blockToSectionCoord(maxX);
         int minChunkZ = SectionPos.blockToSectionCoord(minZ);
         int maxChunkZ = SectionPos.blockToSectionCoord(maxZ);
-        int centerChunkX = SectionPos.blockToSectionCoord(anchor.getX());
-        int centerChunkZ = SectionPos.blockToSectionCoord(anchor.getZ());
+        int centerChunkX = SectionPos.blockToSectionCoord(center.getX());
+        int centerChunkZ = SectionPos.blockToSectionCoord(center.getZ());
         List<ChunkPos> chunks = new ArrayList<>();
         for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
             for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
@@ -171,9 +208,7 @@ public final class SweepingTrailScanPlanner {
         int minSectionY = SectionPos.blockToSectionCoord(minY);
         int maxSectionY = SectionPos.blockToSectionCoord(maxY);
         List<Integer> sectionYs = new ArrayList<>();
-        for (int sectionY = minSectionY; sectionY <= maxSectionY; sectionY++) {
-            sectionYs.add(sectionY);
-        }
+        for (int sectionY = minSectionY; sectionY <= maxSectionY; sectionY++) sectionYs.add(sectionY);
         return sectionYs;
     }
 

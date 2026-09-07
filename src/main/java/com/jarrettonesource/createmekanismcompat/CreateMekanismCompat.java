@@ -2,6 +2,7 @@ package com.jarrettonesource.createmekanismcompat;
 
 import com.jarrettonesource.createmekanismcompat.assembly.MekanismAssemblyMoveTracker;
 import com.jarrettonesource.createmekanismcompat.config.CmcConfig;
+import com.jarrettonesource.createmekanismcompat.mounted.MountedChunkLoaderTickets;
 import com.jarrettonesource.createmekanismcompat.network.CmcNetwork;
 import com.mojang.logging.LogUtils;
 import net.neoforged.bus.api.IEventBus;
@@ -16,6 +17,12 @@ import org.slf4j.Logger;
 public final class CreateMekanismCompat {
     public static final String MOD_ID = "create_mekanism_compat";
     public static final String DISPLAY_NAME = "Create Aeronautics: Mekanism Compatibility";
+
+    static {
+        // Register the custom Sable loading ticket type before any world ticket data is deserialized.
+        MountedChunkLoaderTickets.bootstrap();
+    }
+
     public static final Logger LOGGER = LogUtils.getLogger();
 
     public CreateMekanismCompat(IEventBus modBus, ModContainer modContainer) {

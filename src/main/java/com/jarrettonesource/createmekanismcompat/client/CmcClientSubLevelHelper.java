@@ -27,12 +27,14 @@ public final class CmcClientSubLevelHelper {
 
     @Nullable
     public static ClientSubLevel resolve(BlockPos localPos) {
+        CmcClientSableTracking.retryPending();
         ClientSubLevel subLevel = Sable.HELPER.getContainingClient(localPos);
         return subLevel == null || subLevel.isRemoved() ? null : subLevel;
     }
 
     @Nullable
     public static ClientSubLevel resolve(BlockEntity tile) {
+        CmcClientSableTracking.retryPending();
         ClientSubLevel subLevel = Sable.HELPER.getContainingClient(tile);
         return subLevel == null || subLevel.isRemoved() ? null : subLevel;
     }

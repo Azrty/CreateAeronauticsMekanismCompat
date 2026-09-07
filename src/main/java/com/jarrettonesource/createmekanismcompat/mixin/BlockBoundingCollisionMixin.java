@@ -1,5 +1,8 @@
 package com.jarrettonesource.createmekanismcompat.mixin;
 
+import dev.ryanhcode.sable.sublevel.SubLevel;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import mekanism.common.block.BlockBounding;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.BlockGetter;
@@ -23,15 +26,34 @@ public abstract class BlockBoundingCollisionMixin {
     @Unique
     private static final VoxelShape CMC_BLOCK_BOUNDS = Shapes.block();
 
+    @Unique
+    private static final Map<VoxelShape, VoxelShape> CMC_CLIPPED_SHAPES = new ConcurrentHashMap<>();
+
     @Inject(method = "getCollisionShape", at = @At("RETURN"), cancellable = true)
     private void cmc$clipProxyCollisionShape(BlockState state, BlockGetter level, BlockPos pos, CollisionContext context,
             CallbackInfoReturnable<VoxelShape> callback) {
-        VoxelShape shape = callback.getReturnValue();
-        if (shape.isEmpty() || !cmc$extendsOutsideBlock(shape)) {
+        if (!(level instanceof SubLevel)) {
             return;
         }
 
-        callback.setReturnValue(Shapes.join(shape, CMC_BLOCK_BOUNDS, BooleanOp.AND).optimize());
+        VoxelShape shape = callback.getReturnValue();
+        if (shape == null || shape.isEmpty()) {
+            return;
+        }
+
+        VoxelShape cached = CMC_CLIPPED_SHAPES.get(shape);
+        if (cached == null) {
+            cached = cmc$extendsOutsideBlock(shape)
+                    ? Shapes.join(shape, CMC_BLOCK_BOUNDS, BooleanOp.AND).optimize()
+                    : shape;
+            if (CMC_CLIPPED_SHAPES.size() > 512) {
+                CMC_CLIPPED_SHAPES.clear();
+            }
+            CMC_CLIPPED_SHAPES.put(shape, cached);
+        }
+        if (cached != shape) {
+            callback.setReturnValue(cached);
+        }
     }
 
     @Unique

@@ -74,9 +74,6 @@ public final class MountedTeleporterTargeting {
     public static void syncServerSableTrackingAfterTeleport(Entity entity, @Nullable MountedMekanismContext mountedTarget, MekanismTeleportEvent.Teleporter event) {
         if (mountedTarget != null) {
             Vec3 localTarget = mountedTarget.subLevel().logicalPose().transformPositionInverse(event.getTarget());
-            if (entity instanceof EntityStickExtension stick) {
-                stick.sable$setPlotPosition(localTarget);
-            }
             if (entity instanceof EntityMovementExtension movement) {
                 movement.sable$setTrackingSubLevel(mountedTarget.subLevel());
                 movement.sable$setLastTrackingSubLevelID(mountedTarget.subLevelId());

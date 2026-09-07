@@ -1,6 +1,6 @@
 package com.jarrettonesource.createmekanismcompat.mixin;
 
-import com.jarrettonesource.createmekanismcompat.mounted.MountedDimensionalStabilizerTickets;
+import com.jarrettonesource.createmekanismcompat.mounted.MountedChunkLoaderTickets;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
@@ -15,12 +15,11 @@ public abstract class SubLevelPhysicsSystemMixin {
     @Inject(method = "tick", at = @At("HEAD"))
     private void cmc$refreshMountedTicketsBeforeChunkChecks(SubLevelContainer sidelessContainer, CallbackInfo callback) {
         if (sidelessContainer instanceof ServerSubLevelContainer container) {
-            MountedDimensionalStabilizerTickets.refresh(container);
+            MountedChunkLoaderTickets.refresh(container);
         }
     }
 
     @Inject(method = "updatePose", at = @At("RETURN"))
     private void cmc$refreshMountedTicketsAfterPoseUpdate(ServerSubLevel serverSubLevel, CallbackInfo callback) {
-        MountedDimensionalStabilizerTickets.refresh(serverSubLevel);
     }
 }
