@@ -9,13 +9,14 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import mekanism.common.tile.machine.TileEntityDigitalMiner;
+import mekanism.common.util.WorldUtils;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
-import net.minecraft.world.level.chunk.LevelChunk;
-import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.LevelChunk;
 
 public final class SweepingTrailScanPlanner {
     private static final int TIME_CHECK_INTERVAL = 256;
@@ -67,12 +68,6 @@ public final class SweepingTrailScanPlanner {
                 state.requestTicketRefresh();
                 break;
             }
-            int sectionIndex = context.level().getSectionIndexFromSectionY(job.sectionY());
-            if (sectionIndex < 0 || sectionIndex >= chunk.getSections().length) {
-                state.completeActiveSectionJob();
-                continue;
-            }
-            LevelChunkSection section = chunk.getSection(sectionIndex);
             int remainingBudget = budget - stats.visitedPositions;
             int remainingJob = job.size() - state.sectionCursor();
             int toInspect = Math.min(remainingBudget, remainingJob);
@@ -87,7 +82,12 @@ public final class SweepingTrailScanPlanner {
                 if (!scanBounds.contains(pos)) {
                     continue;
                 }
-                BlockState blockState = section.getBlockState(job.localXAt(cursor), job.localYAt(cursor), job.localZAt(cursor));
+                BlockState blockState = WorldUtils.getBlockStateIfLoaded((BlockGetter) context.level(), pos);
+                if (blockState == null) {
+                    state.requestTicketRefresh();
+                    stats.skippedUnloadedSections++;
+                    break;
+                }
                 MountedMiningTarget target = MountedTargetRules.resolve(context, miner, pos, blockState);
                 if (target != null && !state.hasQueuedTarget(target.pos())) {
                     targets.add(target);
@@ -186,17 +186,6 @@ public final class SweepingTrailScanPlanner {
                         Math.min(maxZ, sectionMaxZ) - sectionMinZ
                 );
 
-                LevelChunk chunk = level.getChunkSource().getChunkNow(chunkPos.x, chunkPos.z);
-                if (chunk != null) {
-                    if (sectionIndex >= chunk.getSections().length) {
-                        continue;
-                    }
-                    LevelChunkSection section = chunk.getSection(sectionIndex);
-                    if (section.hasOnlyAir()) {
-                        stats.skippedEmptySections++;
-                        continue;
-                    }
-                }
                 jobs.add(job);
             }
         }
