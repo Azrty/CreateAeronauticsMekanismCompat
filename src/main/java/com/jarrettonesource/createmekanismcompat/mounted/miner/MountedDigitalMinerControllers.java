@@ -29,6 +29,7 @@ public final class MountedDigitalMinerControllers {
         }
         TileEntityDigitalMinerAccessor access = (TileEntityDigitalMinerAccessor) miner;
         access.cmc$setRunning(true);
+        miner.searcher.found = 0;
         miner.searcher.state = State.SEARCHING;
 
         MountedScanState state = stateFor(mounted);
@@ -40,11 +41,6 @@ public final class MountedDigitalMinerControllers {
         return true;
     }
 
-    /**
-     * Called every server tick by the existing mixin, but v5 keeps this path
-     * O(1) while targets remain. The expensive scanner is entered only after
-     * the target queue becomes empty, or after an explicit invalidation.
-     */
     public static boolean scanMounted(TileEntityDigitalMiner miner) {
         MountedMekanismContext mounted = mountedContext(miner).orElse(null);
         if (mounted == null) {
@@ -61,6 +57,7 @@ public final class MountedDigitalMinerControllers {
         }
         if (!canEverMine(miner)) {
             STATES.remove(key);
+            miner.searcher.found = 0;
             miner.searcher.state = State.FINISHED;
             if (miner.getToMine() != 0) {
                 clearOreMap(miner);
@@ -70,10 +67,6 @@ public final class MountedDigitalMinerControllers {
 
         MountedScanState state = STATES.computeIfAbsent(key, ignored -> new MountedScanState());
         int queueBefore = state.queuedTargetCount();
-
-        // Explicit configuration changes are correctness invalidations. They
-        // clear stale targets, which naturally makes the queue empty and allows
-        // one fresh scan; this is not a timed/periodic refresh.
         state.updateScanSignature(scanSignature(miner));
 
         ChunkPos currentGlobalChunk = new ChunkPos(mounted.globalBlockPos());
@@ -83,6 +76,7 @@ public final class MountedDigitalMinerControllers {
             if (state.minerChunkLoaded()) {
                 state.invalidateForMinerChunkUnload();
             }
+            miner.searcher.found = 0;
             miner.searcher.state = State.SEARCHING;
             syncOreMap(miner, state);
             refreshTicketsIfNeeded(miner, mounted, state);
@@ -92,13 +86,8 @@ public final class MountedDigitalMinerControllers {
             return true;
         }
         state.updateMinerChunkLoaded(true);
-
-        // Controller.scan prunes stale out-of-bounds targets first. If any
-        // valid mineral remains afterward it immediately returns without scan.
         CONTROLLER.scan(mounted, miner, state);
-        // Reuse Mekanism's already-container-synced search state instead of a
-        // client heuristic. SEARCHING is only exposed while there is genuinely
-        // unfinished mounted scan work and no target ready to mine.
+        miner.searcher.found = state.queuedTargetCount();
         miner.searcher.state = state.queuedTargetCount() == 0 && state.hasScanGeneration()
                 ? State.SEARCHING
                 : State.FINISHED;
@@ -118,6 +107,7 @@ public final class MountedDigitalMinerControllers {
         }
         if (!canEverMine(miner)) {
             STATES.remove(MountedMinerKey.from(mounted));
+            miner.searcher.found = 0;
             miner.searcher.state = State.FINISHED;
             if (miner.getToMine() != 0) {
                 clearOreMap(miner);
@@ -125,10 +115,18 @@ public final class MountedDigitalMinerControllers {
             return true;
         }
         MountedScanState state = stateFor(mounted);
+        int queueBefore = state.queuedTargetCount();
         CONTROLLER.mine(mounted, miner, state);
+        if (queueBefore > 0 && state.queuedTargetCount() == 0) {
+            state.reset();
+            state.updateScanSignature(scanSignature(miner));
+        }
+
+        miner.searcher.found = state.queuedTargetCount();
+        miner.searcher.state = state.queuedTargetCount() == 0
+                ? State.SEARCHING
+                : State.FINISHED;
         syncOreMap(miner, state);
-        // O(1) unless mine() detected that the cached target chunk unloaded.
-        // In that case we refresh tickets once and keep the target intact.
         refreshTicketsIfNeeded(miner, mounted, state);
         return true;
     }
@@ -166,11 +164,6 @@ public final class MountedDigitalMinerControllers {
         return STATES.computeIfAbsent(MountedMinerKey.from(context), key -> new MountedScanState());
     }
 
-    /**
-     * Small fingerprint checked every tick so changing filters/radius/Y/inverse
-     * never leaves a stale cache active. Filter lists are normally tiny, making
-     * this vastly cheaper than a world scan.
-     */
     private static long scanSignature(TileEntityDigitalMiner miner) {
         long h = 0xcbf29ce484222325L;
         h = mix(h, miner.getRadius());
@@ -214,11 +207,6 @@ public final class MountedDigitalMinerControllers {
         access.cmc$setCachedToMine(0);
     }
 
-    /**
-     * Do not allocate a new sentinel map for every mined block. The map only
-     * changes on the 0 <-> nonzero transition; intermediate counts update the
-     * integer tracker in-place.
-     */
     private static void syncOreMap(TileEntityDigitalMiner miner, MountedScanState state) {
         int count = state.queuedTargetCount();
         int previous = state.lastSyncedQueueCount();
