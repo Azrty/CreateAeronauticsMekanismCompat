@@ -27,10 +27,6 @@ public final class MountedDigitalMinerController {
         MountedScanBounds currentBounds = MountedScanBounds.current(context, miner);
         state.pruneOutside(currentBounds, miner.getRadius(), miner.getDiameter());
         int queueBefore = state.queuedTargetCount();
-        if (queueBefore > 0) {
-            state.recordScanStats(0, 0, 0, 0, 0, 0);
-            return 0;
-        }
 
         int budget = CmcConfig.DIGITAL_MINER_SCAN_BUDGET.get();
         int timeBudgetMicros = CmcConfig.DIGITAL_MINER_SCAN_TIME_BUDGET_MICROS.get();
@@ -39,10 +35,15 @@ public final class MountedDigitalMinerController {
             state.recordScanStats(0, 0, 0, 0, 0, 0);
             return 0;
         }
+        int remainingTargetCapacity = maxQueue - queueBefore;
+        if (remainingTargetCapacity <= 0) {
+            state.recordScanStats(0, 0, 0, 0, 0, 0);
+            return 0;
+        }
 
         long deadlineNanos = System.nanoTime() + timeBudgetMicros * 1_000L;
         List<MountedMiningTarget> selectedTargets = scanPlanner.nextBatch(
-                context, miner, state, budget, maxQueue, deadlineNanos);
+                context, miner, state, budget, remainingTargetCapacity, deadlineNanos);
         state.enqueueTargets(selectedTargets, maxQueue);
         return state.queuedTargetCount() - queueBefore;
     }
