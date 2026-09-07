@@ -7,7 +7,9 @@ import com.jarrettonesource.createmekanismcompat.mounted.miner.MountedScanSectio
 import com.jarrettonesource.createmekanismcompat.mounted.miner.MountedScanState;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
+import mekanism.common.content.miner.MinerFilter;
 import mekanism.common.tile.machine.TileEntityDigitalMiner;
 import mekanism.common.util.WorldUtils;
 import net.minecraft.core.BlockPos;
@@ -54,6 +56,7 @@ public final class SweepingTrailScanPlanner {
             return targets;
         }
 
+        IdentityHashMap<BlockState, MinerFilter<?>> filterCache = new IdentityHashMap<>();
         while (stats.visitedPositions < budget && targets.size() < targetLimit && System.nanoTime() < deadlineNanos) {
             MountedScanSectionJob job = state.activeSectionJob();
             if (job == null) {
@@ -88,7 +91,7 @@ public final class SweepingTrailScanPlanner {
                     stats.skippedUnloadedSections++;
                     break;
                 }
-                MountedMiningTarget target = MountedTargetRules.resolve(context, miner, pos, blockState);
+                MountedMiningTarget target = MountedTargetRules.resolveBatchCached(context, miner, pos, blockState, filterCache);
                 if (target != null && !state.hasQueuedTarget(target.pos())) {
                     targets.add(target);
                 }
