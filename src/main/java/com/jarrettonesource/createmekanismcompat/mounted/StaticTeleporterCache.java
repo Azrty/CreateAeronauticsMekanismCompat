@@ -93,6 +93,15 @@ public final class StaticTeleporterCache extends SavedData {
             TeleporterFrequency frequency,
             GlobalPos source
     ) {
+        return getClosest(server, frequency, source, source);
+    }
+
+    public static @Nullable GlobalPos getClosest(
+            MinecraftServer server,
+            TeleporterFrequency frequency,
+            GlobalPos distanceOrigin,
+            GlobalPos excludedCoordinate
+    ) {
         StaticTeleporterCache cache = get(server);
         FrequencyKey key = frequencyKey(frequency);
         LinkedHashSet<GlobalPos> cachedStatic = cache.teleporters.get(key);
@@ -105,7 +114,7 @@ public final class StaticTeleporterCache extends SavedData {
         GlobalPos best = null;
         List<GlobalPos> staleStatic = new ArrayList<>();
         for (GlobalPos candidate : candidates) {
-            if (candidate.equals(source)) {
+            if (candidate.equals(excludedCoordinate)) {
                 continue;
             }
 
@@ -157,7 +166,7 @@ public final class StaticTeleporterCache extends SavedData {
                 continue;
             }
 
-            if (best == null || isCloser(source, candidate, best)) {
+            if (best == null || isCloser(distanceOrigin, candidate, best)) {
                 best = candidate;
             }
         }
