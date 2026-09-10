@@ -70,7 +70,8 @@ public abstract class TileEntityTeleporterMixin {
         if (mounted == null) {
             StaticTeleporterCache.remember(teleporter, frequency);
         }
-        callback.setReturnValue(StaticTeleporterCache.getClosest(level.getServer(), frequency, source));
+        callback.setReturnValue(StaticTeleporterCache.getClosest(
+                level.getServer(), frequency, source, teleporter.getTileGlobalPos()));
     }
 
     @Inject(method = "getToTeleport", at = @At("HEAD"), cancellable = true)
