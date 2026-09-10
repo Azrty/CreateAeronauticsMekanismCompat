@@ -3,6 +3,7 @@ package com.jarrettonesource.createmekanismcompat.mixin;
 import com.jarrettonesource.createmekanismcompat.config.CmcConfig;
 import com.jarrettonesource.createmekanismcompat.mounted.MountedMekanismContext;
 import com.jarrettonesource.createmekanismcompat.mounted.MountedTeleporterTargeting;
+import com.jarrettonesource.createmekanismcompat.mounted.StaticTeleporterCache;
 import mekanism.api.Action;
 import mekanism.api.AutomationType;
 import mekanism.api.energy.IEnergyContainer;
@@ -53,25 +54,40 @@ public abstract class PacketPortableTeleporterTeleportMixin {
             return;
         }
 
-        GlobalPos coords = found.getClosestCoords(GlobalPos.of(player.level().dimension(), player.blockPosition()));
+        MinecraftServer server = player.level().getServer();
+        if (server == null) {
+            callback.cancel();
+            return;
+        }
+        GlobalPos source = GlobalPos.of(player.level().dimension(), player.blockPosition());
+        GlobalPos coords = StaticTeleporterCache.getClosest(server, found, source);
         if (coords == null) {
             callback.cancel();
             return;
         }
 
-        MinecraftServer server = player.level().getServer();
-        ServerLevel teleWorld = server == null ? null : server.getLevel(coords.dimension());
+        ServerLevel teleWorld = server.getLevel(coords.dimension());
+        if (teleWorld == null) {
+            callback.cancel();
+            return;
+        }
+
         TileEntityTeleporter teleporter = WorldUtils.getTileEntity(TileEntityTeleporter.class, teleWorld, coords.pos());
+        if (teleporter == null && StaticTeleporterCache.isCached(server, coords)) {
+            teleporter = StaticTeleporterCache.resolveForTeleport(server, coords);
+        }
         if (teleporter == null) {
             callback.cancel();
             return;
         }
 
         MountedMekanismContext mountedTarget = MountedTeleporterTargeting.resolveMountedTarget(teleporter);
-        if (mountedTarget == null) {
+        if (mountedTarget != null && !teleporter.getChunkLoader().canOperate()) {
+            // Portable teleporters obey the same hard requirement: physics
+            // destinations are only valid while an Anchor is operating.
+            callback.cancel();
             return;
         }
-
         Runnable energyExtraction = null;
         long energyCost = 0L;
         if (!player.isCreative()) {
@@ -97,7 +113,9 @@ public abstract class PacketPortableTeleporterTeleportMixin {
                 stack,
                 energyCost
         );
-        MountedTeleporterTargeting.refineMountedEventTarget(teleporter, mountedTarget, event);
+        if (mountedTarget != null) {
+            MountedTeleporterTargeting.refineMountedEventTarget(teleporter, mountedTarget, event);
+        }
         if (NeoForge.EVENT_BUS.post(event).isCanceled()) {
             callback.cancel();
             return;
