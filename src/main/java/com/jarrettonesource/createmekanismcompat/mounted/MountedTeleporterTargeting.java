@@ -14,6 +14,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.network.PacketDistributor;
 import org.jetbrains.annotations.Nullable;
@@ -28,9 +29,15 @@ public final class MountedTeleporterTargeting {
 
     public static long calculateProjectedEnergyCost(Entity entity, Level targetWorld, GlobalPos coords) {
         if (targetWorld instanceof ServerLevel serverLevel) {
-            BlockEntity blockEntity = serverLevel.getBlockEntity(coords.pos());
-            if (blockEntity instanceof TileEntityTeleporter targetTeleporter && MountedMekanismContextResolver.resolve(targetTeleporter).isPresent()) {
-                return TileEntityTeleporter.calculateEnergyCost(entity, targetWorld, GlobalPos.of(coords.dimension(), getProjectedTeleporterTargetPos(targetTeleporter)));
+            // Read a destination teleporter only if its chunk is already loaded.
+            // Static teleporters deliberately stay unloaded until a teleport is
+            // actually executed, so readiness/energy checks must never load it.
+            LevelChunk chunk = serverLevel.getChunkSource().getChunkNow(coords.pos().getX() >> 4, coords.pos().getZ() >> 4);
+            BlockEntity blockEntity = chunk == null ? null : chunk.getBlockEntity(coords.pos());
+            if (blockEntity instanceof TileEntityTeleporter targetTeleporter
+                    && MountedMekanismContextResolver.resolve(targetTeleporter).isPresent()) {
+                return TileEntityTeleporter.calculateEnergyCost(entity, targetWorld,
+                        GlobalPos.of(coords.dimension(), getProjectedTeleporterTargetPos(targetTeleporter)));
             }
         }
         return TileEntityTeleporter.calculateEnergyCost(entity, targetWorld, coords);
