@@ -1,21 +1,26 @@
 package com.jarrettonesource.createmekanismcompat.mixin;
 
-import com.jarrettonesource.createmekanismcompat.CreateMekanismCompat;
 import com.jarrettonesource.createmekanismcompat.config.CmcConfig;
 import com.jarrettonesource.createmekanismcompat.mounted.ChunkTicketPolicy;
 import com.jarrettonesource.createmekanismcompat.mounted.MountedAabb;
 import com.jarrettonesource.createmekanismcompat.mounted.MountedMekanismContext;
 import com.jarrettonesource.createmekanismcompat.mounted.MountedMekanismContextResolver;
 import com.jarrettonesource.createmekanismcompat.mounted.MountedTeleporterTargeting;
+import com.jarrettonesource.createmekanismcompat.mounted.StaticTeleporterCache;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import mekanism.api.event.MekanismTeleportEvent;
+import mekanism.common.content.teleporter.TeleporterFrequency;
+import mekanism.common.lib.frequency.FrequencyType;
 import mekanism.common.tile.TileEntityTeleporter;
+import mekanism.common.util.WorldUtils;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.GlobalPos;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -37,6 +42,36 @@ public abstract class TileEntityTeleporterMixin {
     @Unique
     @Nullable
     private ChunkPos cmc$lastGlobalChunk;
+
+    @Unique
+    private boolean cmc$staticChunkTicketsSuppressed;
+
+    @Inject(method = "getClosest", at = @At("HEAD"), cancellable = true)
+    private void cmc$getCachedClosest(TeleporterFrequency frequency, CallbackInfoReturnable<GlobalPos> callback) {
+        if (!CmcConfig.ENABLE_MOUNTED_TELEPORTER_TARGETS.get() || frequency == null) {
+            return;
+        }
+        TileEntityTeleporter teleporter = (TileEntityTeleporter) (Object) this;
+        if (!(teleporter.getLevel() instanceof ServerLevel level) || level.getServer() == null) {
+            return;
+        }
+
+        MountedMekanismContext mounted = MountedMekanismContextResolver.resolve(teleporter).orElse(null);
+        if (mounted != null && !teleporter.getChunkLoader().canOperate()) {
+            // Physics teleporters are unsafe without their Anchor keeping the
+            // Sable sublevel and projected chunk alive.
+            callback.setReturnValue(null);
+            return;
+        }
+
+        GlobalPos source = mounted == null
+                ? teleporter.getTileGlobalPos()
+                : GlobalPos.of(mounted.level().dimension(), mounted.globalBlockPos());
+        if (mounted == null) {
+            StaticTeleporterCache.remember(teleporter, frequency);
+        }
+        callback.setReturnValue(StaticTeleporterCache.getClosest(level.getServer(), frequency, source));
+    }
 
     @Inject(method = "getToTeleport", at = @At("HEAD"), cancellable = true)
     private void cmc$getMountedEntitiesToTeleport(boolean sameDimension, Level destinationLevel, CallbackInfoReturnable<List<Entity>> callback) {
@@ -85,6 +120,26 @@ public abstract class TileEntityTeleporterMixin {
     )
     private long cmc$calculateProjectedEnergyCostForTeleport(Entity entity, Level targetWorld, GlobalPos coords) {
         return cmc$calculateProjectedEnergyCost(entity, targetWorld, coords);
+    }
+
+    @Redirect(
+            method = "teleport",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lmekanism/common/util/WorldUtils;getTileEntity(Ljava/lang/Class;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/entity/BlockEntity;",
+                    ordinal = 0
+            )
+    )
+    private BlockEntity cmc$loadCachedStaticDestination(Class<?> tileClass, BlockGetter blockGetter, BlockPos pos) {
+        if (CmcConfig.ENABLE_MOUNTED_TELEPORTER_TARGETS.get() && blockGetter instanceof ServerLevel level && level.getServer() != null) {
+            GlobalPos globalPos = GlobalPos.of(level.dimension(), pos);
+            if (StaticTeleporterCache.isCached(level.getServer(), globalPos)) {
+                return StaticTeleporterCache.resolveForTeleport(level.getServer(), globalPos);
+            }
+        }
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        BlockEntity tile = WorldUtils.getTileEntity((Class) tileClass, blockGetter, pos);
+        return tile;
     }
 
     @Redirect(
@@ -180,29 +235,53 @@ public abstract class TileEntityTeleporterMixin {
     }
 
     @Inject(method = "getChunkSet", at = @At("HEAD"), cancellable = true)
-    private void cmc$getMountedChunkSet(CallbackInfoReturnable<Set<ChunkPos>> callback) {
+    private void cmc$getTeleporterChunkSet(CallbackInfoReturnable<Set<ChunkPos>> callback) {
         if (!CmcConfig.ENABLE_MOUNTED_TELEPORTER_TARGETS.get()) {
             return;
         }
         TileEntityTeleporter teleporter = (TileEntityTeleporter) (Object) this;
-        MountedMekanismContextResolver.resolve(teleporter)
-                .map(context -> ChunkTicketPolicy.teleporterChunks(context, teleporter))
-                .ifPresent(callback::setReturnValue);
+        MountedMekanismContext mounted = MountedMekanismContextResolver.resolve(teleporter).orElse(null);
+        if (mounted == null) {
+            // Anchor upgrades intentionally do nothing for normal/static
+            // teleporters. Their destination metadata lives in the cache.
+            callback.setReturnValue(Collections.emptySet());
+        } else {
+            callback.setReturnValue(ChunkTicketPolicy.teleporterChunks(mounted, teleporter));
+        }
     }
 
     @Inject(method = "onUpdateServer", at = @At("RETURN"))
-    private void cmc$refreshMountedChunkTickets(CallbackInfoReturnable<Boolean> callback) {
+    private void cmc$refreshTeleporterCacheAndTickets(CallbackInfoReturnable<Boolean> callback) {
         if (!CmcConfig.ENABLE_MOUNTED_TELEPORTER_TARGETS.get()) {
             return;
         }
         TileEntityTeleporter teleporter = (TileEntityTeleporter) (Object) this;
-        MountedMekanismContextResolver.resolve(teleporter).ifPresent(context -> {
-            ChunkPos current = new ChunkPos(context.globalBlockPos());
+        MountedMekanismContext mounted = MountedMekanismContextResolver.resolve(teleporter).orElse(null);
+        if (mounted != null) {
+            cmc$staticChunkTicketsSuppressed = false;
+            TeleporterFrequency frequency = teleporter.getFrequencyComponent().getFrequency(FrequencyType.TELEPORTER);
+            if (frequency != null) {
+                StaticTeleporterCache.forget(teleporter, frequency);
+            }
+            ChunkPos current = new ChunkPos(mounted.globalBlockPos());
             if (!current.equals(cmc$lastGlobalChunk)) {
                 cmc$lastGlobalChunk = current;
                 teleporter.getChunkLoader().refreshChunkTickets();
             }
-        });
+            return;
+        }
+
+        cmc$lastGlobalChunk = null;
+        TeleporterFrequency frequency = teleporter.getFrequencyComponent().getFrequency(FrequencyType.TELEPORTER);
+        if (frequency != null) {
+            StaticTeleporterCache.remember(teleporter, frequency);
+        }
+        if (!cmc$staticChunkTicketsSuppressed) {
+            // Force one reconciliation so tickets created by an older version
+            // are released immediately now that getChunkSet() is empty.
+            teleporter.getChunkLoader().refreshChunkTickets();
+            cmc$staticChunkTicketsSuppressed = true;
+        }
     }
 
     @Unique
