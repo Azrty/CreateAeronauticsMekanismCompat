@@ -1,5 +1,6 @@
 package com.jarrettonesource.createmekanismcompat.assembly;
 
+import com.jarrettonesource.createmekanismcompat.mounted.StaticTeleporterCache;
 import mekanism.common.lib.frequency.FrequencyManager;
 import mekanism.common.lib.frequency.FrequencyType;
 import mekanism.common.content.teleporter.TeleporterFrequency;
@@ -14,6 +15,9 @@ public final class TeleporterFrequencyMoveSync {
         if (blockEntity instanceof TileEntityTeleporter teleporter) {
             TeleporterFrequency frequency = teleporter.getFrequencyComponent().getFrequency(FrequencyType.TELEPORTER);
             if (frequency != null) {
+                // The old world coordinate must stop being a static cached
+                // destination before Sable moves this teleporter into physics.
+                StaticTeleporterCache.forget(teleporter, frequency);
                 FrequencyManager<TeleporterFrequency> manager = FrequencyType.TELEPORTER.getFrequencyManager(frequency);
                 if (manager != null) {
                     manager.deactivate(frequency, teleporter);
